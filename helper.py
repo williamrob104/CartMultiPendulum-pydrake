@@ -34,8 +34,8 @@ def CartMultiPendulumSystem(m_cart=1, m1=1, l1=1, **kwargs):
     Parser(plant, scene_graph).AddModelsFromString(sdf_string, "sdf")
     plant.Finalize()
 
-    builder.ExportInput(plant.get_actuation_input_port(), "f_cart")
-    builder.ExportOutput(plant.get_state_output_port(), "x")
+    builder.ExportInput(plant.GetInputPort("cart_multi_pendulum_actuation"), "f_cart")
+    builder.ExportOutput(plant.GetOutputPort("cart_multi_pendulum_state"), "x")
     builder.ExportOutput(scene_graph.get_query_output_port(), "query")
 
     cart_multi_pendulum = builder.Build()
