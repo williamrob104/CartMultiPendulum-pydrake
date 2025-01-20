@@ -4,6 +4,7 @@ from pydrake.all import (
     AddMultibodyPlantSceneGraph,
     Diagram,
     DiagramBuilder,
+    LeafSystem,
     Linearize,
     MultibodyPlant,
     LinearQuadraticRegulator,
@@ -41,40 +42,65 @@ def CartMultiPendulumSystem(m_cart=1, m1=1, l1=1, **kwargs):
     return cart_multi_pendulum
 
 
-def CartMultiPendulumStabalizingLqrController(cart_multi_pendulum: Diagram, configuration: list[str], Q, R):
-    """A linaer system of the cart_multi_pendulum at the configuration
+class CartMultiPendulumStabilizingController(LeafSystem):
+    def __init__(self, cart_multi_pendulum: Diagram, configuration: list[str], Q, R):
+        """A linaer system of the cart_multi_pendulum at the configuration
 
-    Args:
-        cart_multi_pendulum: system returned by `CartMultiPendulumSystem`
-        configuration: e.g, ['up', 'down', ...]
-        Q: LQR Q matrix
-        R: LQR R matrix
-    """
-    x_star_world = [0]
-    for c in configuration:
-        if c == 'down':
-            x_star_world += [0]
-        elif c == 'up':
-            x_star_world += [np.pi]
-        else:
-            raise RuntimeError(f"Unknown configuration '{c}'")
-    x_star_world += [0] * (1 + len(configuration))
-    x_star = CartMultiPendulumWorld2Joint(len(x_star_world)) @ np.array(x_star_world)
+        Args:
+            cart_multi_pendulum: system returned by `CartMultiPendulumSystem`
+            configuration: e.g, ['up', 'down', ...]
+            Q: LQR Q matrix
+            R: LQR R matrix
+        """
+        LeafSystem.__init__(self)
+        num_states = cart_multi_pendulum.num_continuous_states()
+        num_pendulums = (num_states // 2) - 1
+        if num_pendulums != len(configuration):
+            raise RuntimeError(f"Number of configurations shold be {num_pendulums}, but got {len(configuration)}")
 
-    plant = cart_multi_pendulum.GetSubsystemByName('plant')
+        x0_world = [0]
+        for c in configuration:
+            if c == 'down':
+                x0_world += [0]
+            elif c == 'up':
+                x0_world += [np.pi]
+            else:
+                raise RuntimeError(f"Unknown configuration '{c}'")
+        x0_world += [0] * (1 + len(configuration))
+        T_j2w = _CartMultiPendulumJoint2World(num_states)
+        T_w2j = np.linalg.inv(T_j2w)
+        x0 = T_w2j @ np.array(x0_world)
+        u0 = np.zeros(1)
+        Q = T_j2w.transpose() @ Q @ T_j2w
 
-    if plant.num_multibody_states() != len(x_star):
-        raise RuntimeError(f"Number of configurations shold be {(plant.num_multibody_states())//2-1}, but got {len(configuration)}")
+        context = cart_multi_pendulum.CreateDefaultContext()
+        cart_multi_pendulum.GetMutableSubsystemState(cart_multi_pendulum.GetSubsystemByName('plant'), context).get_mutable_continuous_state().SetFromVector(x0)
+        cart_multi_pendulum.get_input_port(0).FixValue(context, u0)
 
-    context = plant.CreateDefaultContext()
-    plant.SetPositionsAndVelocities(context, x_star)
-    plant.get_actuation_input_port().FixValue(context, [0])
+        linear_plant = Linearize(cart_multi_pendulum, context)
+        A = linear_plant.A()
+        B = linear_plant.B()
 
-    controller = LinearQuadraticRegulator(plant, context, Q, R,
-                                          input_port_index=plant.get_actuation_input_port().get_index())
-    return controller
+        K, _ = LinearQuadraticRegulator(A, B, Q, R)
 
-def CartMultiPendulumJoint2World(num_states: int):
+        self.K, self.x0, self.u0 = K, x0, u0
+        self.DeclareVectorInputPort("x", num_states)
+        self.DeclareVectorOutputPort("f_cart", 1, self.DoCalcOutput)
+
+    def DoCalcOutput(self, context, output):
+        num_states = len(self.x0)
+        x = self.get_input_port().Eval(context)
+        delta_x = x - self.x0
+        delta_x[1:num_states//2] = self.wrap_to_pi(delta_x[1:num_states//2])
+        u = self.u0 - self.K @ delta_x
+        output.SetFromVector(u)
+
+    @staticmethod
+    def wrap_to_pi(angle):
+        return (angle + np.pi) % (2 * np.pi) - np.pi
+
+
+def _CartMultiPendulumJoint2World(num_states: int):
     """Matrix that transforms joint coordinates to world coordinates
 
     Args:
@@ -88,15 +114,6 @@ def CartMultiPendulumJoint2World(num_states: int):
     T = np.block([[T, zero],
                   [zero, T]])
     return T
-
-
-def CartMultiPendulumWorld2Joint(num_states: int):
-    """Matrix that transforms world coordinates to joint coordinates
-
-    Args:
-        num_states: equals (num_pendulums+1)*2
-    """
-    return np.linalg.inv(CartMultiPendulumJoint2World(num_states))
 
 
 def _CartMultiPendulumSdf(m_cart, **kwargs):
@@ -164,6 +181,7 @@ def _CartMultiPendulumSdf(m_cart, **kwargs):
 
     # parent_link and z for each joint, update each iteration
     parent_link = 'cart'
+    y = -0.17
     z = 0.0
     for i in range(1,num_pendulums+1):
         mi = kwargs[f'm{i}']
@@ -174,7 +192,7 @@ def _CartMultiPendulumSdf(m_cart, **kwargs):
 
         sdf_string += f"""
         <link name="pendulum{i}">
-            <pose>0 -0.17 {z} 0 0 0</pose>
+            <pose>0 {y} {z} 0 0 0</pose>
             <inertial>
                 <pose>0 0 {-li/2} 0 0 0</pose>
                 <mass>{mi}</mass>
@@ -208,6 +226,7 @@ def _CartMultiPendulumSdf(m_cart, **kwargs):
             </axis>
         </joint>
         """
+        y -= 2 * rod_radius
         z -= li
         parent_link = f'pendulum{i}'
 
