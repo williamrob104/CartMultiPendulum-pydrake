@@ -42,6 +42,29 @@ def CartMultiPendulumSystem(m_cart=1, m1=1, l1=1, **kwargs):
     return cart_multi_pendulum
 
 
+def CartMultiPendulumEquilibriumState(configuration: list[str]):
+    """The equilibrium state of a cart_multi_pendulum at the configuration
+
+    Args:
+        configuration: e.g, ['up', 'down', ...]
+
+    Returns:
+        np.ndarray: the equilibrium state, length == 2*(len(configuration)+1)
+    """
+    x0_w = [0]
+    for c in configuration:
+        if c == 'down':
+            x0_w += [0]
+        elif c == 'up':
+            x0_w += [np.pi]
+        else:
+            raise RuntimeError(f"Unknown configuration '{c}'")
+    x0_w += [0] * (1 + len(configuration))
+    T_j2w = _CartMultiPendulumJoint2World(len(x0_w))
+    x0_j = np.linalg.inv(T_j2w) @ np.array(x0_w)
+    return x0_j
+
+
 class CartMultiPendulumStabilizingController(LeafSystem):
     def __init__(self, cart_multi_pendulum: Diagram, configuration: list[str], Q, R):
         """A linaer system of the cart_multi_pendulum at the configuration
@@ -58,19 +81,10 @@ class CartMultiPendulumStabilizingController(LeafSystem):
         if num_pendulums != len(configuration):
             raise RuntimeError(f"Number of configurations shold be {num_pendulums}, but got {len(configuration)}")
 
-        x0_world = [0]
-        for c in configuration:
-            if c == 'down':
-                x0_world += [0]
-            elif c == 'up':
-                x0_world += [np.pi]
-            else:
-                raise RuntimeError(f"Unknown configuration '{c}'")
-        x0_world += [0] * (1 + len(configuration))
-        T_j2w = _CartMultiPendulumJoint2World(num_states)
-        T_w2j = np.linalg.inv(T_j2w)
-        x0 = T_w2j @ np.array(x0_world)
+        x0 = CartMultiPendulumEquilibriumState(configuration)
         u0 = np.zeros(1)
+
+        T_j2w = _CartMultiPendulumJoint2World(num_states)
         Q = T_j2w.transpose() @ Q @ T_j2w
 
         context = cart_multi_pendulum.CreateDefaultContext()
